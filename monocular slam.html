@@ -1,0 +1,223 @@
+<!DOCTYPE html>
+<html lang="id">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, user-scalable=no">
+    <title>Web Monocular SLAM + GPS</title>
+    <style>
+        body { margin: 0; overflow: hidden; font-family: 'Courier New', Courier, monospace; }
+        #info-overlay {
+            position: absolute;
+            top: 10px;
+            left: 10px;
+            color: #00ff00;
+            background: rgba(0, 0, 0, 0.7);
+            padding: 10px;
+            border-radius: 5px;
+            pointer-events: none;
+            z-index: 100;
+            font-size: 12px;
+            max-width: 80%;
+        }
+        #ar-button-container {
+            position: absolute;
+            bottom: 20px;
+            width: 100%;
+            text-align: center;
+            z-index: 100;
+        }
+        h3 { margin: 0 0 5px 0; border-bottom: 1px solid #00ff00; padding-bottom: 3px; }
+        .data-row { margin-bottom: 2px; }
+        .label { font-weight: bold; }
+    </style>
+</head>
+<body>
+
+    <div id="info-overlay">
+        <h3>SYSTEM STATUS</h3>
+        <div class="data-row"><span class="label">GPS Lat:</span> <span id="gps-lat">Waiting...</span></div>
+        <div class="data-row"><span class="label">GPS Long:</span> <span id="gps-lon">Waiting...</span></div>
+        <div class="data-row"><span class="label">Akurasi GPS:</span> <span id="gps-acc">Waiting...</span></div>
+        <hr style="border-color: #555;">
+        <div class="data-row"><span class="label">SLAM Status:</span> <span id="slam-status">Ready</span></div>
+        <div class="data-row"><span class="label">Cam Pos (X,Y,Z):</span> <span id="cam-pos">0, 0, 0</span></div>
+        <div style="margin-top: 5px; color: #aaa; font-size: 10px;">
+            Ketuk layar untuk menempatkan marker (Virtual Object) pada permukaan yang terdeteksi.
+        </div>
+    </div>
+
+    <script type="importmap">
+        {
+            "imports": {
+                "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+                "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+            }
+        }
+    </script>
+
+    <script type="module">
+        import * as THREE from 'three';
+        import { ARButton } from 'three/addons/webxr/ARButton.js';
+
+        let container;
+        let camera, scene, renderer;
+        let controller;
+        let reticle;
+        let hitTestSource = null;
+        let hitTestSourceRequested = false;
+
+        // Variabel UI
+        const uiLat = document.getElementById('gps-lat');
+        const uiLon = document.getElementById('gps-lon');
+        const uiAcc = document.getElementById('gps-acc');
+        const uiCam = document.getElementById('cam-pos');
+        const uiStatus = document.getElementById('slam-status');
+
+        init();
+        setupGPS();
+        animate();
+
+        function init() {
+            container = document.createElement('div');
+            document.body.appendChild(container);
+
+            scene = new THREE.Scene();
+
+            // Setup Kamera
+            camera = new THREE.PerspectiveCamera(70, window.innerWidth / window.innerHeight, 0.01, 20);
+
+            // Pencahayaan
+            const light = new THREE.HemisphereLight(0xffffff, 0xbbbbff, 1);
+            light.position.set(0.5, 1, 0.25);
+            scene.add(light);
+
+            // Renderer
+            renderer = new THREE.WebGLRenderer({ antialias: true, alpha: true });
+            renderer.setPixelRatio(window.devicePixelRatio);
+            renderer.setSize(window.innerWidth, window.innerHeight);
+            renderer.xr.enabled = true; // Aktifkan WebXR
+            container.appendChild(renderer.domElement);
+
+            // Tombol AR
+            const arButton = ARButton.createButton(renderer, { requiredFeatures: ['hit-test'] });
+            document.body.appendChild(arButton);
+
+            // Controller (Input Sentuh)
+            controller = renderer.xr.getController(0);
+            controller.addEventListener('select', onSelect);
+            scene.add(controller);
+
+            // Reticle (Penanda Target di Lantai/Dinding)
+            reticle = new THREE.Mesh(
+                new THREE.RingGeometry(0.15, 0.2, 32).rotateX(-Math.PI / 2),
+                new THREE.MeshBasicMaterial()
+            );
+            reticle.matrixAutoUpdate = false;
+            reticle.visible = false;
+            scene.add(reticle);
+
+            window.addEventListener('resize', onWindowResize);
+        }
+
+        // Fungsi saat layar disentuh: Taruh objek 3D
+        function onSelect() {
+            if (reticle.visible) {
+                // Buat Cone (Kerucut) sebagai marker
+                const geometry = new THREE.CylinderGeometry(0, 0.05, 0.2, 32).translate(0, 0.1, 0);
+                const material = new THREE.MeshPhongMaterial({ color: 0xffffff * Math.random() });
+                const mesh = new THREE.Mesh(geometry, material);
+                
+                // Set posisi sesuai Reticle (hasil SLAM hit-test)
+                reticle.matrix.decompose(mesh.position, mesh.quaternion, mesh.scale);
+                scene.add(mesh);
+                
+                uiStatus.innerText = "Object Placed!";
+                setTimeout(() => uiStatus.innerText = "Tracking...", 1000);
+            }
+        }
+
+        // Setup GPS Bawaan HP
+        function setupGPS() {
+            if ("geolocation" in navigator) {
+                const options = {
+                    enableHighAccuracy: true,
+                    timeout: 5000,
+                    maximumAge: 0
+                };
+
+                navigator.geolocation.watchPosition(
+                    (position) => {
+                        uiLat.innerText = position.coords.latitude.toFixed(6);
+                        uiLon.innerText = position.coords.longitude.toFixed(6);
+                        uiAcc.innerText = position.coords.accuracy.toFixed(1) + " m";
+                    },
+                    (error) => {
+                        uiStatus.innerText = "GPS Error: " + error.message;
+                    },
+                    options
+                );
+            } else {
+                uiStatus.innerText = "GPS Not Supported";
+            }
+        }
+
+        function onWindowResize() {
+            camera.aspect = window.innerWidth / window.innerHeight;
+            camera.updateProjectionMatrix();
+            renderer.setSize(window.innerWidth, window.innerHeight);
+        }
+
+        function animate() {
+            renderer.setAnimationLoop(render);
+        }
+
+        function render(timestamp, frame) {
+            if (frame) {
+                // 1. Dapatkan Referensi Ruang
+                const referenceSpace = renderer.xr.getReferenceSpace();
+                const session = renderer.xr.getSession();
+
+                // 2. Setup Hit Test (Mendeteksi permukaan untuk SLAM)
+                if (hitTestSourceRequested === false) {
+                    session.requestReferenceSpace('viewer').then(function (referenceSpace) {
+                        session.requestHitTestSource({ space: referenceSpace }).then(function (source) {
+                            hitTestSource = source;
+                        });
+                    });
+                    session.addEventListener('end', function () {
+                        hitTestSourceRequested = false;
+                        hitTestSource = null;
+                    });
+                    hitTestSourceRequested = true;
+                }
+
+                // 3. Proses Hit Test
+                if (hitTestSource) {
+                    const hitTestResults = frame.getHitTestResults(hitTestSource);
+
+                    if (hitTestResults.length > 0) {
+                        const hit = hitTestResults[0];
+                        // Tampilkan Reticle di lokasi yang terdeteksi
+                        reticle.visible = true;
+                        reticle.matrix.fromArray(hit.getPose(referenceSpace).transform.matrix);
+                        uiStatus.innerText = "Surface Detected (Tracking OK)";
+                    } else {
+                        reticle.visible = false;
+                        uiStatus.innerText = "Scanning Environment...";
+                    }
+                }
+
+                // 4. Update Posisi Kamera (Visual Odometry)
+                // Mendapatkan posisi kamera relatif terhadap start point
+                const viewerPose = frame.getViewerPose(referenceSpace);
+                if (viewerPose) {
+                    const pos = viewerPose.views[0].transform.position;
+                    uiCam.innerText = `${pos.x.toFixed(2)}, ${pos.y.toFixed(2)}, ${pos.z.toFixed(2)}`;
+                }
+            }
+
+            renderer.render(scene, camera);
+        }
+    </script>
+</body>
+</html>
